@@ -1,0 +1,38 @@
+:root {
+  /* 80% Soft Minimal Flat Base */
+  --bg-primary: #FFF8F0;
+  --bg-surface: #FFFFFF;
+  --bg-subtle: #F7EFE6;
+  --text-main: #1E2A3A;
+  --text-muted: #536275;
+  --border-light: #E7DACB;
+  --brand-navy: #152238;
+  --brand-blue: #1E4E8C;
+  --status-confirmed: #1C7446;
+  --status-warning: #B35C00;
+  --status-storm: #C02E2E;
+
+  /* 15% Glassmorphism (Over imagery & floating nav) */
+  --glass-bg: rgba(255, 255, 255, 0.75);
+  --glass-border: rgba(255, 255, 255, 0.45);
+  --glass-blur: blur(14px) saturate(140%);
+  --glass-shadow: 0 8px 32px 0 rgba(21, 34, 56, 0.08);
+
+  /* 5% Claymorphism (Strictly for Hero CTAs & Status Milestones) */
+  --clay-radius: 28px;
+  --clay-cta-bg: #1E4E8C;
+  --clay-cta-shadow: 
+    inset 2px 2px 4px rgba(255, 255, 255, 0.35),
+    inset -2px -2px 4px rgba(0, 0, 0, 0.25),
+    0 10px 20px -5px rgba(30, 78, 140, 0.4);
+  --clay-badge-bg: #FFFFFF;
+  --clay-badge-shadow:
+    inset 2px 2px 4px rgba(255, 255, 255, 0.9),
+    inset -2px -2px 4px rgba(21, 34, 56, 0.06),
+    0 6px 14px rgba(21, 34, 56, 0.05);
+
+  /* Typography & Layout */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --max-width: 1200px;
+  --header-height: 72px;
+}
