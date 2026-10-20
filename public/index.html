@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex,nofollow">
+  <title>Houston Roofing &amp; Construction | Replacement, Repair &amp; Honest Guidance</title>
+  <link rel="stylesheet" href="/css/base.css">
+  <link rel="stylesheet" href="/css/components.css">
+</head>
+<body>
+  <div class="disclaimer-banner">
+    Design concept, not the official website. All verified company data remains subject to confirmation.
+  </div>
+
+  <div id="announcementBanner" class="announcement-banner" style="display:none;"></div>
+
+  <header class="glass-nav">
+    <div class="container nav-inner">
+      <a href="/" class="wordmark">Houston Roofing &amp; Construction</a>
+      <nav class="nav-links">
+        <a href="/services.html">Services</a>
+        <a href="/book.html" class="btn-clay">Book Free Inspection</a>
+        <a href="/login.html" id="navAuthLink">Account</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="container">
+        <div class="hero-card">
+          <div class="hero-eyebrow">Houston roofing, done honestly</div>
+          <h1 class="hero-title">A roof you can trust. A process you can see.</h1>
+          <p class="hero-subhead">Book a free inspection online, then follow every step of your project from your private customer dashboard.</p>
+          <div style="display: flex; gap: 16px; flex-wrap: wrap;">
+            <a href="/book.html" class="btn-clay">Book a free inspection</a>
+            <a href="tel:+18322373737" class="btn-secondary">Call (832) 237-3737</a>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="container" style="padding-top: 60px;">
+      <h2>Our Core Roofing Services</h2>
+      <div class="grid-3">
+        <div class="card-service">
+          <div>
+            <h3>Asphalt Shingle Replacement</h3>
+            <p>Full-system tear-off and architectural shingle installation designed for Gulf Coast heat and storm resistance.</p>
+          </div>
+          <a href="/book.html" class="btn-secondary">Book Inspection</a>
+        </div>
+        <div class="card-service">
+          <div>
+            <h3>Standing Seam Metal Roofing</h3>
+            <p>Durable, heat-reflective standing seam metal systems built for long-term protection and energy reduction.</p>
+          </div>
+          <a href="/book.html" class="btn-secondary">Get Metal Estimate</a>
+        </div>
+        <div class="card-service">
+          <div>
+            <h3>Commercial &amp; Low-Slope</h3>
+            <p>TPO, PVC, and modified bitumen systems installed around business operating hours with phased scheduling.</p>
+          </div>
+          <a href="/book.html" class="btn-secondary">Schedule Walkthrough</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="container" style="padding-top: 60px;">
+      <h2>Credentials &amp; Standards</h2>
+      <p style="color: var(--text-muted); margin-bottom: 24px;">Straight facts on our certifications and licensing:</p>
+      <div class="grid-3">
+        <div class="card-service">
+          <h3>RCAT Licensed <span class="badge-verify">TODO: verify #</span></h3>
+          <p>Texas has no state roofer license. The Roofing Contractors Association of Texas provides rigorous voluntary licensing.</p>
+        </div>
+        <div class="card-service">
+          <h3>GAF Master Elite <span class="badge-verify">Verify Directory</span></h3>
+          <p>Top manufacturer tier providing eligibility for the strongest non-prorated manufacturer warranties available.</p>
+        </div>
+        <div class="card-service">
+          <h3>BBB A+ Rating <span class="badge-verify">4.9 Stars</span></h3>
+          <p>Over 300 verified customer reviews highlighting transparent documentation and no-pressure assessments.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="container" style="padding-top: 60px;">
+      <h2>Client Experiences</h2>
+      <div class="grid-3">
+        <div class="card-service">
+          <p><em>"Sample: The project manager walked the roof with me, showed me photos and explained my options without pressure."</em></p>
+          <strong>- Sample customer (Cypress, TX)</strong>
+        </div>
+        <div class="card-service">
+          <p><em>"Sample: I expected to hear I needed a new roof. They recommended a minor repair and explained why."</em></p>
+          <strong>- Sample customer (Spring, TX)</strong>
+        </div>
+        <div class="card-service">
+          <p><em>"Sample: Phased schedule across our multi-family buildings with solid updates to residents throughout."</em></p>
+          <strong>- Sample property manager (Houston, TX)</strong>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container">
+      <p><strong>Compliance Notice:</strong> We are roofing contractors, not public insurance adjusters. We do not negotiate or settle claims on your behalf. Texas law prohibits contractors from waiving, rebating, or absorbing insurance deductibles.</p>
+      <p style="margin-top: 16px;">11330 West Rd, Houston, TX 77065 | Phone: (832) 237-3737 | Hours: Mon-Sun 7am-8pm</p>
+      <p style="margin-top: 8px;">Design concept, not the official website.</p>
+    </div>
+  </footer>
+
+  <script type="module">
+    import { observeAuth } from '/js/auth.js';
+    observeAuth(user => {
+      const link = document.getElementById('navAuthLink');
+      if (user && link) {
+        link.textContent = 'Dashboard';
+        link.href = '/dashboard.html';
+      }
+    });
+
+    fetch('/api/announcements')
+      .then(res => res.json())
+      .then(data => {
+        if (data && data.length > 0) {
+          const banner = document.getElementById('announcementBanner');
+          banner.textContent = `${data[0].title}: ${data[0].body}`;
+          banner.className = `announcement-banner ${data[0].severity}`;
+          banner.style.display = 'block';
+        }
+      });
+  </script>
+</body>
+</html>
