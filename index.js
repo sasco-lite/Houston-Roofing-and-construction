@@ -1,815 +1,181 @@
-const express = require('express');
-const { MongoClient, ObjectId } = require('mongodb');
-const crypto = require('crypto');
-const cookieParser = require('cookie-parser');
-const adminModule = require('./admin');
+// Public website + booking API. Exports the Express app (Vercel serverless; no app.listen).
+const express = require('express'), crypto = require('crypto'), { MongoClient } = require('mongodb');
+
+// ---- Client details: replace every [PLACEHOLDER] with verified information ----
+const C = {
+  name: '[BUSINESS NAME]', phone: '[PHONE e.g. +1 555 000 0000]', wa: '[WHATSAPP DIGITS ONLY]',
+  email: '[EMAIL]', address: '[BUSINESS ADDRESS]', area: '[SERVICE AREA]', hours: '[BUSINESS HOURS]',
+  url: process.env.SITE_URL || ''
+};
+const SERVICES = [
+  ['New Roof Installation', 'Complete roofing systems built to last.'],
+  ['Roof Repairs', 'Leaks, missing shingles and storm damage fixed fast.'],
+  ['Roof Replacement', 'Strip-off and replacement with clear, written scope.'],
+  ['Roof Inspections', 'A full check with photos and an honest report.'],
+  ['Gutters', 'Installation, repair and cleaning.'],
+  ['Renovations', 'Extensions and general construction work.']
+];
+const STATUSES = ['Pending', 'Confirmed', 'In Progress', 'Completed', 'Cancelled'];
 
 const app = express();
-app.use(express.json({ limit: '1mb' }));
-app.use(express.urlencoded({ extended: true, limit: '1mb' }));
-app.use(cookieParser());
+app.disable('x-powered-by');
+app.set('trust proxy', true);
+app.use((q, r, n) => {
+  r.set({
+    'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'strict-origin-when-cross-origin',
+    'Strict-Transport-Security': 'max-age=31536000; includeSubDomains', 'Permissions-Policy': 'geolocation=(), camera=()',
+    'Content-Security-Policy': "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+  });
+  n();
+});
+app.use(express.json({ limit: '10kb' }));
 
-// --- MONGODB CONNECTION MANAGER ---
-let cachedDb = null;
-async function getDb() {
-    if (cachedDb) return cachedDb;
-    const uri = process.env.MONGODB_URI;
-    if (!uri) throw new Error('MONGODB_URI is not defined.');
-    const client = new MongoClient(uri);
-    await client.connect();
-    cachedDb = client.db('houston_roofing');
-    await initDb(cachedDb);
-    return cachedDb;
+// ---- Cached MongoDB connection (reused across warm serverless invocations) ----
+const g = global.__mongo || (global.__mongo = {});
+async function db() {
+  if (!process.env.MONGODB_URI) throw new Error('MONGODB_URI is not set');
+  if (!g.p) g.p = new MongoClient(process.env.MONGODB_URI, { maxPoolSize: 5, serverSelectionTimeoutMS: 6000 }).connect().catch(e => { g.p = null; throw e; });
+  return (await g.p).db('roofing');
+}
+// Fixed-window rate limiter stored in MongoDB (works across serverless instances)
+async function hit(key, max, win) {
+  const c = (await db()).collection('ratelimits'), now = Date.now();
+  const d = await c.findOneAndUpdate({ _id: key, t: { $gt: now } }, { $inc: { n: 1 } }, { returnDocument: 'after' });
+  if (d) return d.n <= max;
+  await c.replaceOne({ _id: key }, { _id: key, n: 1, t: now + win }, { upsert: true });
+  return true;
+}
+const s = (v, m) => String(v ?? '').replace(/[\u0000-\u001f<>]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, m);
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => '&#' + c.charCodeAt(0) + ';');
+const ip = q => (q.headers['x-forwarded-for'] || q.ip || '').split(',')[0].trim();
+
+// Shared by the public form and the admin editor
+function validate(b, partial) {
+  const v = {}, e = [];
+  const f = (k, fn) => { if (!partial || k in b) fn(); };
+  f('name', () => { v.name = s(b.name, 80); if (v.name.length < 2) e.push('Enter your name.'); });
+  f('phone', () => { v.phone = s(b.phone, 25); const d = v.phone.replace(/\D/g, ''); if (!/^\+?[0-9\s\-().]+$/.test(v.phone) || d.length < 7 || d.length > 15) e.push('Enter a valid phone number.'); });
+  f('email', () => { v.email = s(b.email, 120).toLowerCase(); if (v.email && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v.email)) e.push('Enter a valid email or leave it blank.'); });
+  f('address', () => { v.address = s(b.address, 200); if (v.address.length < 5) e.push('Enter the property address.'); });
+  f('service', () => { v.service = s(b.service, 60); if (!SERVICES.some(x => x[0] === v.service)) e.push('Choose a service.'); });
+  f('date', () => {
+    v.date = s(b.date, 10); const t = Date.parse(v.date + 'T00:00:00Z'), today = Date.parse(new Date().toISOString().slice(0, 10) + 'T00:00:00Z');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(v.date) || isNaN(t) || (!partial && t < today) || t > today + 366 * 864e5) e.push('Choose a valid date within the next year.');
+  });
+  f('time', () => { v.time = s(b.time, 5); if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(v.time)) e.push('Choose a preferred time.'); });
+  f('description', () => { v.description = s(b.description, 1000); if (v.description.length < 10) e.push('Describe the job in at least 10 characters.'); });
+  return { v, e };
 }
 
-// --- DATABASE INITIALIZATION ---
-async function initDb(db) {
-    await db.collection('users').createIndex({ email: 1 }, { unique: true });
-    await db.collection('sessions').createIndex({ expires: 1 }, { expireAfterSeconds: 0 });
-    await db.collection('slotOccupancy').createIndex({ date: 1, time: 1, serviceId: 1 }, { unique: true });
-    
-    const settings = await db.collection('settings').findOne({ _id: 'global' });
-    if (!settings) {
-        await db.collection('settings').insertOne({
-            _id: 'global',
-            isApproved: false,
-            timezone: 'America/Chicago',
-            hours: {
-                monday: { start: '08:00', end: '18:00', open: true },
-                tuesday: { start: '08:00', end: '18:00', open: true },
-                wednesday: { start: '08:00', end: '18:00', open: true },
-                thursday: { start: '08:00', end: '18:00', open: true },
-                friday: { start: '08:00', end: '18:00', open: true },
-                saturday: { start: '08:00', end: '16:00', open: true },
-                sunday: { start: '10:00', end: '16:00', open: true }
-            },
-            slotInterval: 30,
-            minLeadTimeHours: 12,
-            maxHorizonDays: 60,
-            blackoutDates: ['2026-11-26', '2026-12-25', '2027-01-01'],
-            appointmentTypes: [
-                { id: 'free-inspection', name: 'Free roof inspection', duration: 60, buffer: 30, capacity: 2 },
-                { id: 'free-estimate', name: 'Free estimate', duration: 60, buffer: 30, capacity: 2 },
-                { id: 'storm-assessment', name: 'Storm or hail damage assessment', duration: 90, buffer: 30, capacity: 2 },
-                { id: 'repair-visit', name: 'Roof repair visit', duration: 60, buffer: 30, capacity: 1 },
-                { id: 'commercial-walkthrough', name: 'Commercial walkthrough', duration: 90, buffer: 30, capacity: 1 },
-                { id: 'phone-consultation', name: 'Phone consultation', duration: 20, buffer: 10, capacity: 3 }
-            ]
-        });
-    }
-}
-
-// --- SECURITY & AUTH UTILS ---
-function hashPassword(password) {
-    const salt = crypto.randomBytes(16).toString('hex');
-    const derivedKey = crypto.scryptSync(password, salt, 64).toString('hex');
-    return `${salt}:${derivedKey}`;
-}
-function verifyPassword(password, hash) {
-    const [salt, key] = hash.split(':');
-    const derivedKey = crypto.scryptSync(password, salt, 64).toString('hex');
-    return key === derivedKey;
-}
-function generateToken() { return crypto.randomBytes(32).toString('hex'); }
-function hashToken(token) { return crypto.createHash('sha256').update(token).digest('hex'); }
-
-async function requireAuth(req, res, next) {
-    const token = req.cookies.session;
-    if (!token) return res.status(401).json({ error: 'Unauthorized' });
-    const db = await getDb();
-    const session = await db.collection('sessions').findOne({ _id: hashToken(token) });
-    if (!session || session.expires < new Date()) return res.status(401).json({ error: 'Session expired' });
-    req.user = await db.collection('users').findOne({ _id: session.userId });
-    next();
-}
-
-// --- HTML TEMPLATING SYSTEM (80:15:5 Design System) ---
-const commonCSS = `
-    :root {
-        --c-bg: #F7F9FC; --c-surface: #FFFFFF; --c-navy: #102238; --c-slate: #65748B;
-        --c-charcoal: #273449; --c-orange: #F47738; --c-blue: #32A7E8; --c-teal: #42C6B1;
-        --font: system-ui, -apple-system, sans-serif;
-    }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: var(--font); background: var(--c-bg); color: var(--c-charcoal); line-height: 1.6; }
-    a { text-decoration: none; color: var(--c-blue); }
-    .container { max-width: 1200px; margin: 0 auto; padding: 0 20px; }
-    
-    /* 80% Soft Flat */
-    .card { background: var(--c-surface); border-radius: 12px; padding: 24px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); border: 1px solid rgba(0,0,0,0.05); }
-    
-    /* 15% Glassmorphism */
-    .glass { background: rgba(255,255,255,0.8); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,0.4); border-radius: 16px; box-shadow: 0 8px 32px rgba(16,34,56,0.08); }
-    .glass-dark { background: rgba(16,34,56,0.6); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,0.1); color: white; border-radius: 16px; }
-
-    /* 5% Claymorphism */
-    .btn-clay { background: var(--c-orange); color: white; font-weight: 600; padding: 14px 28px; border-radius: 12px; border: none; cursor: pointer; box-shadow: inset 4px 4px 8px rgba(255,255,255,0.3), inset -4px -4px 8px rgba(0,0,0,0.15), 0 6px 12px rgba(244,119,56,0.3); transition: transform 0.2s, box-shadow 0.2s; display: inline-block; text-align: center; }
-    .btn-clay:hover { transform: translateY(-2px); box-shadow: inset 4px 4px 8px rgba(255,255,255,0.4), inset -4px -4px 8px rgba(0,0,0,0.15), 0 8px 16px rgba(244,119,56,0.4); }
-    .btn-clay:active { transform: scale(0.96); box-shadow: inset 6px 6px 10px rgba(0,0,0,0.2), 0 2px 4px rgba(244,119,56,0.2); }
-    .btn-secondary { background: var(--c-surface); color: var(--c-navy); border: 1px solid rgba(0,0,0,0.1); padding: 14px 28px; border-radius: 12px; font-weight: 600; transition: all 0.2s; cursor: pointer; }
-    .btn-secondary:hover { background: #eee; }
-
-    /* Layout & Utilities */
-    nav { background: var(--c-surface); padding: 16px 0; position: sticky; top: 0; z-index: 100; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
-    .nav-inner { display: flex; justify-content: space-between; align-items: center; }
-    .logo { font-size: 1.5rem; font-weight: 800; color: var(--c-navy); }
-    .nav-links a { color: var(--c-navy); margin-left: 24px; font-weight: 500; transition: color 0.2s; }
-    .nav-links a:hover { color: var(--c-orange); }
-    .mobile-menu-btn { display: none; background: none; border: none; font-size: 1.5rem; cursor: pointer; }
-    
-    footer { background: var(--c-navy); color: white; padding: 60px 0 30px; margin-top: 60px; }
-    .footer-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 40px; margin-bottom: 40px; }
-    .footer-grid a { color: #A0B0C6; }
-    .footer-grid a:hover { color: white; }
-    .disclosure { font-size: 0.85rem; color: #A0B0C6; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 20px; text-align: center; }
-
-    .reveal { opacity: 0; transform: translateY(20px); transition: all 0.6s ease-out; }
-    .reveal.visible { opacity: 1; transform: translateY(0); }
-    
-    section { padding: 80px 0; }
-    h1, h2, h3 { color: var(--c-navy); line-height: 1.2; margin-bottom: 16px; }
-    h2 { font-size: 2.5rem; }
-    
-    @media (max-width: 768px) {
-        .nav-links { display: none; flex-direction: column; position: absolute; top: 100%; left: 0; width: 100%; background: var(--c-surface); padding: 20px; box-shadow: 0 10px 20px rgba(0,0,0,0.1); }
-        .nav-links.active { display: flex; }
-        .nav-links a { margin: 10px 0; }
-        .mobile-menu-btn { display: block; }
-    }
-`;
-
-const renderLayout = async (title, body, req) => {
-    let noindex = '';
-    try {
-        const db = await getDb();
-        const settings = await db.collection('settings').findOne({ _id: 'global' });
-        if (settings && !settings.isApproved) noindex = '<meta name="robots" content="noindex, nofollow"><div style="background:#F5C36B;color:#102238;text-align:center;padding:8px;font-weight:bold;font-size:14px;">Preview Mode: Pending Client Approval</div>';
-    } catch (e) { console.error('DB Error checking approval', e); }
-
-    const isAuthed = req.cookies && req.cookies.session;
-
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>${title} | Houston Roofing & Construction</title>
-    ${noindex}
-    <style>${commonCSS}</style>
-</head>
-<body>
-    <nav>
-        <div class="container nav-inner">
-            <a href="/" class="logo">Houston Roofing</a>
-            <button class="mobile-menu-btn" onclick="document.querySelector('.nav-links').classList.toggle('active')">☰</button>
-            <div class="nav-links">
-                <a href="/services">Services</a>
-                <a href="/why-us">Why Us</a>
-                <a href="/faq">FAQ</a>
-                <a href="/contact">Contact</a>
-                ${isAuthed ? '<a href="/dashboard">Dashboard</a>' : '<a href="/dashboard">Login</a>'}
-                <a href="/book" class="btn-clay" style="padding: 8px 16px; margin-left: 16px;">Book Free Inspection</a>
-            </div>
-        </div>
-    </nav>
-    <main>${body}</main>
-    <footer>
-        <div class="container">
-            <div class="footer-grid">
-                <div>
-                    <h3 style="color:white;">Houston Roofing</h3>
-                    <p>11330 West Rd<br>Houston, TX 77065</p>
-                    <p><a href="tel:+18322373737">(832) 237-3737</a></p>
-                </div>
-                <div>
-                    <h3 style="color:white;">Services</h3>
-                    <p><a href="/services">Residential Roofing</a></p>
-                    <p><a href="/services">Commercial Roofing</a></p>
-                    <p><a href="/services">Storm Damage</a></p>
-                </div>
-                <div>
-                    <h3 style="color:white;">Links</h3>
-                    <p><a href="/book">Book Appointment</a></p>
-                    <p><a href="/dashboard">Customer Portal</a></p>
-                    <p><a href="/admin">Admin Login</a></p>
-                </div>
-            </div>
-            <div class="disclosure">
-                <p>We are roofing contractors, not public insurance adjusters. We do not negotiate or settle claims on your behalf. You are responsible for your insurance deductible. Texas law prohibits contractors from waiving, rebating or absorbing a deductible.</p>
-                <p style="margin-top: 10px;">&copy; ${new Date().getFullYear()} Houston Roofing & Construction. All rights reserved.</p>
-            </div>
-        </div>
-    </footer>
-    <script>
-        const observer = new IntersectionObserver((entries) => {
-            entries.forEach(entry => { if(entry.isIntersecting) entry.target.classList.add('visible'); });
-        });
-        document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
-    </script>
-</body>
-</html>`;
-};
-
-// --- PUBLIC ROUTES ---
-app.get('/', async (req, res) => {
-    const heroCSS = `
-        .hero { position: relative; padding: 120px 0; background: linear-gradient(rgba(16,34,56,0.65), rgba(16,34,56,0.65)), url('https://images.unsplash.com/photo-1600596542815-ffad4c1539a9?w=1600&q=80') center/cover; color: white; min-height: 80vh; display: flex; align-items: center; }
-        .hero-content { max-width: 600px; }
-        .hero h1 { color: white; font-size: 3.5rem; margin: 16px 0; }
-        .eyebrow { text-transform: uppercase; letter-spacing: 2px; font-size: 0.9rem; color: var(--c-gold); font-weight: bold; }
-        .hero-booking-card { position: absolute; right: 20px; top: 50%; transform: translateY(-50%); width: 400px; padding: 30px; }
-        .grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 30px; margin-top: 40px; }
-        @media (max-width: 992px) {
-            .hero { padding: 80px 0; flex-direction: column; text-align: center; }
-            .hero-content { margin: 0 auto; }
-            .hero-booking-card { position: relative; right: 0; top: 0; transform: none; width: 100%; max-width: 500px; margin: 40px auto 0; }
-        }
-    `;
-    const body = `
-        <style>${heroCSS}</style>
-        <div class="hero">
-            <div class="container" style="position: relative; width: 100%;">
-                <div class="hero-content reveal">
-                    <div class="eyebrow">Houston roofing, done honestly</div>
-                    <h1>A roof you can trust. A process you can see.</h1>
-                    <p style="font-size: 1.2rem; margin-bottom: 30px; color: #E2E8F0;">Book a free inspection online, receive clear information about your options, and follow your project's progress from your own dashboard.</p>
-                    <div style="display: flex; gap: 16px; flex-wrap: wrap;">
-                        <a href="/book" class="btn-clay">Book a Free Inspection</a>
-                        <a href="tel:+18322373737" class="btn-secondary" style="background: rgba(255,255,255,0.1); color: white; border-color: rgba(255,255,255,0.3);">Call (832) 237-3737</a>
-                    </div>
-                </div>
-                <div class="glass-dark hero-booking-card reveal" style="transition-delay: 0.2s;">
-                    <h3 style="color: white; margin-bottom: 16px;">Ready to start?</h3>
-                    <p style="font-size: 0.9rem; margin-bottom: 20px; color: #CBD5E1;">Select a service to check our real-time availability.</p>
-                    <form action="/book" method="GET" style="display: flex; flex-direction: column; gap: 12px;">
-                        <select name="service" style="padding: 12px; border-radius: 8px; border: none; width: 100%;">
-                            <option value="free-inspection">Free Roof Inspection</option>
-                            <option value="storm-assessment">Storm/Hail Assessment</option>
-                            <option value="commercial-walkthrough">Commercial Walkthrough</option>
-                        </select>
-                        <button type="submit" class="btn-clay" style="width: 100%;">View Availability &rarr;</button>
-                    </form>
-                </div>
-            </div>
-        </div>
-        <section class="container reveal">
-            <div style="text-align: center; max-width: 800px; margin: 0 auto;">
-                <h2>Our Four-Step Process</h2>
-                <p style="color: var(--c-slate); font-size: 1.1rem;">We inspect. We show you. You decide.</p>
-            </div>
-            <div class="grid-3">
-                <div class="card reveal">
-                    <h3>1. Inspect</h3>
-                    <p>We examine shingles, flashing, vents, and trouble spots meticulously.</p>
-                </div>
-                <div class="card reveal" style="transition-delay: 0.1s;">
-                    <h3>2. Show</h3>
-                    <p>We share photos and plain-language notes directly in your secure customer dashboard.</p>
-                </div>
-                <div class="card reveal" style="transition-delay: 0.2s;">
-                    <h3>3. Explain & Install</h3>
-                    <p>Compare options without pressure. An in-house project manager oversees the job through cleanup.</p>
-                </div>
-            </div>
-        </section>
-    `;
-    res.send(await renderLayout('Home', body, req));
+app.post('/api/bookings', async (q, r) => {
+  try {
+    if (q.body.website) return r.json({ ok: true, bookingId: 'BK-0' }); // honeypot: silently drop bots
+    if (!(await hit('book:' + ip(q), 5, 36e5))) return r.status(429).json({ error: 'Too many requests. Please call us instead.' });
+    const { v, e } = validate(q.body || {});
+    if (e.length) return r.status(400).json({ error: e[0], errors: e });
+    const col = (await db()).collection('bookings');
+    if (await col.findOne({ phone: v.phone, address: v.address, date: v.date, status: { $in: ['Pending', 'Confirmed'] } }))
+      return r.status(409).json({ error: 'A booking for this address and date already exists. We will contact you shortly.' });
+    const doc = { bookingId: 'BK-' + crypto.randomBytes(4).toString('hex').toUpperCase(), ...v, status: 'Pending', createdAt: new Date(), updatedAt: new Date() };
+    await col.insertOne(doc);
+    r.status(201).json({ ok: true, bookingId: doc.bookingId });
+  } catch (err) { console.error(err); r.status(500).json({ error: 'Could not save your booking. Please call us.' }); }
 });
 
-app.get('/services', async (req, res) => {
-    const css = `.service-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 30px; margin-top: 40px; } .service-img { width: 100%; height: 200px; object-fit: cover; border-radius: 8px; margin-bottom: 16px; background: var(--c-slate); }`;
-    const body = `
-        <style>${css}</style>
-        <div class="container section reveal">
-            <h2>Our Roofing Services</h2>
-            <p>Professional residential and commercial roofing solutions for Houston.</p>
-            <div class="service-grid">
-                <div class="card glass">
-                    <img src="https://images.unsplash.com/photo-1513694203232-719a280e022f?w=600&q=80" alt="Asphalt Shingles" class="service-img" loading="lazy">
-                    <h3>Asphalt Roof Replacement</h3>
-                    <p>Full tear-off and new shingle systems designed for Houston heat and storms.</p>
-                    <a href="/book?service=free-estimate" class="btn-clay" style="margin-top: 16px; display: block;">Book This Service</a>
-                </div>
-                <div class="card glass">
-                    <div class="service-img" style="background: var(--c-navy);"></div>
-                    <h3>Metal Roof Replacement</h3>
-                    <p>Long-life, heat-reflective metal panels for strong storm resilience.</p>
-                    <a href="/book?service=free-estimate" class="btn-clay" style="margin-top: 16px; display: block;">Book This Service</a>
-                </div>
-                <div class="card glass">
-                    <div class="service-img" style="background: var(--c-teal);"></div>
-                    <h3>Storm & Hail Assessment</h3>
-                    <p>Fast, honest roof repair and photo-documented damage assessments.</p>
-                    <a href="/book?service=storm-assessment" class="btn-clay" style="margin-top: 16px; display: block;">Book This Service</a>
-                </div>
-                <div class="card glass">
-                    <img src="https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?w=600&q=80" alt="Commercial Flat Roof" class="service-img" loading="lazy">
-                    <h3>Commercial Roofing</h3>
-                    <p>TPO, PVC, flat, and low-slope systems planned around your business operations.</p>
-                    <a href="/book?service=commercial-walkthrough" class="btn-clay" style="margin-top: 16px; display: block;">Book This Service</a>
-                </div>
-            </div>
-        </div>
-    `;
-    res.send(await renderLayout('Services', body, req));
-});
+require('./admin')(app, { db, hit, s, esc, ip, validate, STATUSES, SERVICES, C });
 
-app.get('/faq', async (req, res) => {
-    const css = `.faq-item { margin-bottom: 16px; border: 1px solid rgba(0,0,0,0.1); border-radius: 8px; overflow: hidden; background: var(--c-surface); } .faq-q { padding: 16px 20px; font-weight: bold; cursor: pointer; background: rgba(0,0,0,0.02); display: flex; justify-content: space-between; } .faq-a { padding: 0 20px; max-height: 0; overflow: hidden; transition: max-height 0.3s ease; } .faq-a.open { padding: 16px 20px; max-height: 500px; }`;
-    const body = `
-        <style>${css}</style>
-        <div class="container section reveal" style="max-width: 800px;">
-            <h2>Frequently Asked Questions</h2>
-            <div class="faq-list">
-                <div class="faq-item"><div class="faq-q" onclick="this.nextElementSibling.classList.toggle('open')">Do you handle my insurance claim? <span>+</span></div><div class="faq-a">No. In Texas, a roofer cannot act as the public adjuster on a claim for work they are also performing. We document damage with photos and a written report; you file and manage the claim.</div></div>
-                <div class="faq-item"><div class="faq-q" onclick="this.nextElementSibling.classList.toggle('open')">Will you cover my deductible? <span>+</span></div><div class="faq-a">No. Texas law prohibits contractors from waiving, rebating or absorbing the deductible; the customer owes it to the contractor.</div></div>
-                <div class="faq-item"><div class="faq-q" onclick="this.nextElementSibling.classList.toggle('open')">How does online booking work? <span>+</span></div><div class="faq-a">Choose a service, select an open time, enter details and confirm. You can sign in to see the appointment and project progress.</div></div>
-                <div class="faq-item"><div class="faq-q" onclick="this.nextElementSibling.classList.toggle('open')">Do I need a full replacement? <span>+</span></div><div class="faq-a">Not always. Isolated damage can often be repaired; widespread wear, storm damage or age may favor replacement. We will present both options.</div></div>
-            </div>
-        </div>
-    `;
-    res.send(await renderLayout('FAQ', body, req));
-});
-
-// Other static-ish pages
-app.get('/why-us', async (req, res) => res.send(await renderLayout('Why Us', '<div class="container section"><h2>Why Choose Us</h2><p>Our credentials and real customer focus set us apart. Check our dashboard for pending verifications.</p></div>', req)));
-app.get('/reviews', async (req, res) => res.send(await renderLayout('Reviews', '<div class="container section"><h2>Customer Reviews</h2><div class="card"><strong>Sample Customer</strong><br><em>Sample: The project manager walked the roof with me, showed me photos and explained my options without pressure.</em></div></div>', req)));
-app.get('/updates', async (req, res) => res.send(await renderLayout('Updates', '<div class="container section"><h2>Updates & Resources</h2><p>Check back for storm watches and roofing guides.</p></div>', req)));
-app.get('/contact', async (req, res) => res.send(await renderLayout('Contact', '<div class="container section"><h2>Contact Us</h2><p>11330 West Rd, Houston, TX 77065<br><a href="tel:+18322373737">(832) 237-3737</a></p><a href="/book" class="btn-clay">Book an Appointment</a></div>', req)));
-
-
-// --- BOOKING SYSTEM ---
-app.get('/book', async (req, res) => {
-    const css = `
-        .step { display: none; animation: fadeIn 0.4s; }
-        .step.active { display: block; }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-        .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px; margin-top: 16px; }
-        .cal-day { padding: 10px; text-align: center; border: 1px solid #ddd; border-radius: 8px; cursor: pointer; transition: 0.2s; }
-        .cal-day:not(.disabled):hover, .cal-day.selected { background: var(--c-navy); color: white; border-color: var(--c-navy); }
-        .cal-day.disabled { background: #f5f5f5; color: #bbb; cursor: not-allowed; }
-        .time-slots { display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 10px; margin-top: 16px; }
-        .time-slot { padding: 10px; text-align: center; border: 1px solid var(--c-blue); color: var(--c-navy); border-radius: 8px; cursor: pointer; }
-        .time-slot.selected { background: var(--c-blue); color: white; }
-        input[type="text"], input[type="email"], input[type="tel"], select, textarea { width: 100%; padding: 12px; margin: 8px 0; border: 1px solid #ccc; border-radius: 8px; font-family: inherit; }
-    `;
-    const prefillService = req.query.service || '';
-
-    const body = `
-        <style>${css}</style>
-        <div class="container section" style="max-width: 700px;">
-            <div class="glass card" style="padding: 40px;">
-                <h2 style="text-align:center;">Book an Appointment</h2>
-                <div id="progress" style="display:flex; justify-content:space-between; margin-bottom:30px; font-size: 0.9rem; color: var(--c-slate);">
-                    <span id="p1" style="color:var(--c-navy); font-weight:bold;">1. Service</span>
-                    <span id="p2">2. Details</span>
-                    <span id="p3">3. Time</span>
-                    <span id="p4">4. Confirm</span>
-                </div>
-                
-                <form id="bookingForm">
-                    <!-- Step 1: Service -->
-                    <div id="step1" class="step active">
-                        <h3>Choose a Service</h3>
-                        <select id="b_service" required>
-                            <option value="">Select...</option>
-                            <option value="free-inspection">Free roof inspection</option>
-                            <option value="free-estimate">Free estimate</option>
-                            <option value="storm-assessment">Storm or hail damage assessment</option>
-                            <option value="repair-visit">Roof repair visit</option>
-                            <option value="commercial-walkthrough">Commercial walkthrough</option>
-                            <option value="phone-consultation">Phone consultation</option>
-                        </select>
-                        <button type="button" class="btn-clay" style="width:100%; margin-top:20px;" onclick="nextStep(2)">Next &rarr;</button>
-                    </div>
-
-                    <!-- Step 2: Property Info -->
-                    <div id="step2" class="step">
-                        <h3>Property Information</h3>
-                        <select id="b_property" required>
-                            <option value="">Property Type...</option>
-                            <option value="single-family">Single-family home</option>
-                            <option value="townhome">Townhome</option>
-                            <option value="commercial">Commercial building</option>
-                            <option value="multi-family">Multi-family community</option>
-                            <option value="other">Other</option>
-                        </select>
-                        <input type="text" id="b_address" placeholder="Street Address" required>
-                        <div style="display:flex; gap:10px;">
-                            <input type="text" id="b_city" placeholder="City" required value="Houston">
-                            <input type="text" id="b_zip" placeholder="ZIP Code" required>
-                        </div>
-                        <div style="display:flex; gap:10px; margin-top:20px;">
-                            <button type="button" class="btn-secondary" style="flex:1;" onclick="nextStep(1)">Back</button>
-                            <button type="button" class="btn-clay" style="flex:1;" onclick="nextStep(3)">Next &rarr;</button>
-                        </div>
-                    </div>
-
-                    <!-- Step 3: Date & Time -->
-                    <div id="step3" class="step">
-                        <h3>Choose Date & Time</h3>
-                        <input type="date" id="b_date" required style="width:100%; padding:12px; margin-top:10px; border-radius:8px; border:1px solid #ccc;" onchange="fetchTimes()">
-                        <div id="timeContainer" class="time-slots">Select a date first.</div>
-                        <input type="hidden" id="b_time" required>
-                        <div style="display:flex; gap:10px; margin-top:30px;">
-                            <button type="button" class="btn-secondary" style="flex:1;" onclick="nextStep(2)">Back</button>
-                            <button type="button" class="btn-clay" style="flex:1;" onclick="nextStep(4)" id="btnStep3Next" disabled>Next &rarr;</button>
-                        </div>
-                    </div>
-
-                    <!-- Step 4: Contact & Confirm -->
-                    <div id="step4" class="step">
-                        <h3>Your Details</h3>
-                        <input type="text" id="b_name" placeholder="Full Name" required>
-                        <input type="email" id="b_email" placeholder="Email Address" required>
-                        <input type="tel" id="b_phone" placeholder="Phone Number" required>
-                        <label style="display:flex; align-items:flex-start; gap:10px; margin-top:16px; font-size:0.9rem;">
-                            <input type="checkbox" id="b_consent" required style="margin-top:4px;">
-                            <span>I agree that Houston Roofing & Construction may contact me about this appointment.</span>
-                        </label>
-                        <div id="errorMsg" style="color:red; margin-top:10px; display:none;"></div>
-                        <div style="display:flex; gap:10px; margin-top:30px;">
-                            <button type="button" class="btn-secondary" style="flex:1;" onclick="nextStep(3)">Back</button>
-                            <button type="submit" class="btn-clay" style="flex:1;" id="btnSubmit">Confirm Booking</button>
-                        </div>
-                    </div>
-
-                    <div id="stepSuccess" class="step" style="text-align:center; padding:40px 0;">
-                        <div style="font-size:4rem; color:var(--c-teal);">✓</div>
-                        <h3>Booking Confirmed!</h3>
-                        <p>Reference: <strong id="outRef"></strong></p>
-                        <p style="margin-top:16px;">We have received your request and will contact you shortly.</p>
-                        <a href="/dashboard" class="btn-clay" style="margin-top:20px;">Go to Dashboard</a>
-                    </div>
-                </form>
-            </div>
-        </div>
-
-        <script>
-            // Pre-select service if passed in URL
-            const urlParams = new URLSearchParams(window.location.search);
-            if(urlParams.get('service')) document.getElementById('b_service').value = urlParams.get('service');
-            
-            // Set min date to tomorrow
-            const tmr = new Date(); tmr.setDate(tmr.getDate() + 1);
-            document.getElementById('b_date').min = tmr.toISOString().split('T')[0];
-
-            function nextStep(step) {
-                // Basic validation
-                if(step === 2 && !document.getElementById('b_service').value) return alert('Select a service');
-                if(step === 3 && (!document.getElementById('b_property').value || !document.getElementById('b_address').value)) return alert('Fill property info');
-                
-                document.querySelectorAll('.step').forEach(el => el.classList.remove('active'));
-                document.getElementById('step' + step).classList.add('active');
-                for(let i=1; i<=4; i++) {
-                    document.getElementById('p'+i).style.color = i <= step ? 'var(--c-navy)' : 'var(--c-slate)';
-                    document.getElementById('p'+i).style.fontWeight = i <= step ? 'bold' : 'normal';
-                }
-            }
-
-            async function fetchTimes() {
-                const date = document.getElementById('b_date').value;
-                const service = document.getElementById('b_service').value;
-                const tc = document.getElementById('timeContainer');
-                document.getElementById('b_time').value = '';
-                document.getElementById('btnStep3Next').disabled = true;
-                if(!date || !service) return;
-                
-                tc.innerHTML = 'Loading availability...';
-                try {
-                    const res = await fetch('/api/availability?date=' + date + '&service=' + service);
-                    const data = await res.json();
-                    if(data.error) throw new Error(data.error);
-                    
-                    if(data.slots.length === 0) { tc.innerHTML = 'No times available on this date.'; return; }
-                    
-                    tc.innerHTML = data.slots.map(time => 
-                        '<div class="time-slot" onclick="selectTime(this, \\'' + time + '\\')">' + time + '</div>'
-                    ).join('');
-                } catch(e) { tc.innerHTML = '<span style="color:red;">Failed to load times.</span>'; }
-            }
-
-            function selectTime(el, time) {
-                document.querySelectorAll('.time-slot').forEach(e => e.classList.remove('selected'));
-                el.classList.add('selected');
-                document.getElementById('b_time').value = time;
-                document.getElementById('btnStep3Next').disabled = false;
-            }
-
-            document.getElementById('bookingForm').addEventListener('submit', async (e) => {
-                e.preventDefault();
-                document.getElementById('errorMsg').style.display = 'none';
-                document.getElementById('btnSubmit').disabled = true;
-                document.getElementById('btnSubmit').innerText = 'Processing...';
-
-                const payload = {
-                    service: document.getElementById('b_service').value,
-                    propertyType: document.getElementById('b_property').value,
-                    address: document.getElementById('b_address').value,
-                    city: document.getElementById('b_city').value,
-                    zip: document.getElementById('b_zip').value,
-                    date: document.getElementById('b_date').value,
-                    time: document.getElementById('b_time').value,
-                    name: document.getElementById('b_name').value,
-                    email: document.getElementById('b_email').value,
-                    phone: document.getElementById('b_phone').value,
-                    consent: document.getElementById('b_consent').checked
-                };
-
-                try {
-                    const res = await fetch('/api/bookings', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(payload)
-                    });
-                    const data = await res.json();
-                    if(!res.ok) throw new Error(data.error || 'Booking failed');
-                    
-                    document.getElementById('step4').classList.remove('active');
-                    document.getElementById('stepSuccess').classList.add('active');
-                    document.getElementById('outRef').innerText = data.reference;
-                    document.getElementById('progress').style.display = 'none';
-                } catch(err) {
-                    document.getElementById('errorMsg').innerText = err.message;
-                    document.getElementById('errorMsg').style.display = 'block';
-                    document.getElementById('btnSubmit').disabled = false;
-                    document.getElementById('btnSubmit').innerText = 'Confirm Booking';
-                }
-            });
-        </script>
-    `;
-    res.send(await renderLayout('Book Appointment', body, req));
-});
-
-// --- API ROUTES ---
-app.get('/api/health', async (req, res) => {
-    try {
-        const db = await getDb();
-        await db.command({ ping: 1 });
-        res.json({ status: 'ok', database: 'connected', version: '1.0.0' });
-    } catch (e) {
-        res.status(503).json({ status: 'error', database: 'disconnected' });
-    }
-});
-
-app.get('/api/availability', async (req, res) => {
-    try {
-        const { date, service } = req.query;
-        if (!date || !service) return res.status(400).json({ error: 'Missing date or service' });
-        
-        const db = await getDb();
-        const settings = await db.collection('settings').findOne({ _id: 'global' });
-        
-        if (settings.blackoutDates.includes(date)) return res.json({ slots: [] });
-        
-        const dayOfWeek = new Date(date).toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
-        const dayConfig = settings.hours[dayOfWeek];
-        if (!dayConfig || !dayConfig.open) return res.json({ slots: [] });
-
-        const serviceConfig = settings.appointmentTypes.find(t => t.id === service);
-        if (!serviceConfig) return res.status(400).json({ error: 'Invalid service' });
-
-        // Generate slots
-        let slots = [];
-        let currTime = new Date(\`\${date}T\${dayConfig.start}:00\`);
-        const endTime = new Date(\`\${date}T\${dayConfig.end}:00\`);
-        
-        while (currTime < endTime) {
-            const timeStr = currTime.toTimeString().substring(0,5);
-            slots.push(timeStr);
-            currTime = new Date(currTime.getTime() + settings.slotInterval * 60000);
-        }
-
-        // Check occupancy
-        const occupancies = await db.collection('slotOccupancy').find({ date, serviceId: service }).toArray();
-        const fullSlots = occupancies.filter(o => o.count >= serviceConfig.capacity).map(o => o.time);
-        
-        slots = slots.filter(s => !fullSlots.includes(s));
-        
-        res.json({ slots });
-    } catch (e) {
-        console.error(e);
-        res.status(500).json({ error: 'Internal Server Error' });
-    }
-});
-
-app.post('/api/bookings', async (req, res) => {
-    try {
-        const payload = req.body;
-        if (!payload.consent) return res.status(400).json({ error: 'Consent required' });
-        
-        const db = await getDb();
-        const settings = await db.collection('settings').findOne({ _id: 'global' });
-        const serviceConfig = settings.appointmentTypes.find(t => t.id === payload.service);
-        if (!serviceConfig) return res.status(400).json({ error: 'Invalid service' });
-
-        // Atomic slot occupation attempt
-        const slotId = `${payload.date}_${payload.time}_${payload.service}`;
-        try {
-            const result = await db.collection('slotOccupancy').findOneAndUpdate(
-                { _id: slotId, count: { $lt: serviceConfig.capacity } },
-                { $inc: { count: 1 },$setOnInsert: { date: payload.date, time: payload.time, serviceId: payload.service } },
-                { upsert: true, returnDocument: 'after' }
-            );
-        } catch (error) {
-            if (error.code === 11000) {
-                return res.status(409).json({ error: 'Time slot is no longer available.' });
-            }
-            throw error;
-        }
-
-        // Create user/guest account if not exists
-        let user = await db.collection('users').findOne({ email: payload.email });
-        if (!user) {
-            const tempPassword = crypto.randomBytes(8).toString('hex');
-            const result = await db.collection('users').insertOne({
-                email: payload.email,
-                name: payload.name,
-                phone: payload.phone,
-                passwordHash: hashPassword(tempPassword),
-                role: 'customer',
-                createdAt: new Date()
-            });
-            user = { _id: result.insertedId };
-        }
-
-        const reference = crypto.randomBytes(4).toString('hex').toUpperCase();
-        const booking = {
-            userId: user._id,
-            reference,
-            service: payload.service,
-            propertyType: payload.propertyType,
-            address: payload.address,
-            city: payload.city,
-            zip: payload.zip,
-            date: payload.date,
-            time: payload.time,
-            status: 'requested',
-            consentTimestamp: new Date(),
-            createdAt: new Date()
-        };
-
-        await db.collection('bookings').insertOne(booking);
-
-        // Auto-create project tracker
-        await db.collection('projects').insertOne({
-            bookingId: booking._id,
-            userId: user._id,
-            stage: 1, // Request received
-            stageName: 'Request received',
-            updatedAt: new Date(),
-            notes: []
-        });
-
-        res.json({ success: true, reference });
-    } catch (e) {
-        console.error(e);
-        res.status(500).json({ error: 'Internal Server Error' });
-    }
-});
-
-// --- CUSTOMER DASHBOARD ---
-app.get('/dashboard', async (req, res) => {
-    const token = req.cookies.session;
-    let user = null;
-    if (token) {
-        const db = await getDb();
-        const session = await db.collection('sessions').findOne({ _id: hashToken(token) });
-        if (session && session.expires > new Date()) {
-            user = await db.collection('users').findOne({ _id: session.userId });
-        }
-    }
-
-    if (!user) {
-        // Render Login View
-        const body = `
-            <div class="container section" style="max-width: 400px;">
-                <div class="card glass">
-                    <h2 style="text-align:center;">Customer Portal</h2>
-                    <form id="loginForm" style="display:flex; flex-direction:column; gap:16px;">
-                        <input type="email" id="l_email" placeholder="Email Address" required style="padding:12px; border-radius:8px; border:1px solid #ccc;">
-                        <input type="password" id="l_password" placeholder="Password (Use token from email - demo: type anything)" required style="padding:12px; border-radius:8px; border:1px solid #ccc;">
-                        <button type="submit" class="btn-clay">Login</button>
-                        <div id="l_err" style="color:red; display:none;"></div>
-                    </form>
-                    <p style="text-align:center; margin-top:20px; font-size:0.9rem; color:var(--c-slate);">Note: Since email delivery is disabled in v1, you can register during booking. The dashboard currently requires the password created at DB level. For demo purposes, we will mock email links.</p>
-                </div>
-            </div>
-            <script>
-                document.getElementById('loginForm').addEventListener('submit', async (e) => {
-                    e.preventDefault();
-                    const res = await fetch('/api/auth/login', {
-                        method: 'POST', headers:{'Content-Type':'application/json'},
-                        body: JSON.stringify({email: document.getElementById('l_email').value, password: document.getElementById('l_password').value})
-                    });
-                    if(res.ok) window.location.reload();
-                    else document.getElementById('l_err').style.display='block', document.getElementById('l_err').innerText = (await res.json()).error;
-                });
-            </script>
-        `;
-        return res.send(await renderLayout('Login', body, req));
-    }
-
-    // Authenticated Dashboard View
-    const db = await getDb();
-    const projects = await db.collection('projects').aggregate([
-        { $match: { userId: user._id } },
-        { $lookup: { from: 'bookings', localField: 'bookingId', foreignField: '_id', as: 'booking' } },
-        { $unwind: '$booking' }
-    ]).toArray();
-
-    const body = `
-        <div class="container section">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 30px;">
-                <h2>Welcome, ${user.name.split(' ')[0]}</h2>
-                <button onclick="logout()" class="btn-secondary">Logout</button>
-            </div>
-            
-            <h3>Your Projects & Appointments</h3>
-            ${projects.length === 0 ? '<div class="card"><p>No active projects or appointments.</p></div>' : ''}
-            <div style="display:grid; gap:20px; margin-top:20px;">
-                ${projects.map(p => `
-                    <div class="card glass" style="border-left: 6px solid var(--c-teal);">
-                        <div style="display:flex; justify-content:space-between;">
-                            <h4>${p.booking.service.replace('-', ' ').toUpperCase()}</h4>
-                            <span style="background:var(--c-bg); padding:4px 12px; border-radius:20px; font-size:0.85rem;">Ref: ${p.booking.reference}</span>
-                        </div>
-                        <p style="margin:8px 0; color:var(--c-slate);">Scheduled: <strong>${p.booking.date} at${p.booking.time}</strong></p>
-                        <p style="margin:8px 0; color:var(--c-slate);">${p.booking.address},${p.booking.city}</p>
-                        
-                        <div style="margin-top:20px; padding-top:20px; border-top:1px solid rgba(0,0,0,0.05);">
-                            <p style="font-weight:bold; margin-bottom:10px;">Project Status</p>
-                            <div style="background:#eee; border-radius:10px; height:10px; overflow:hidden; margin-bottom:10px;">
-                                <div style="width: ${(p.stage/11)*100}%; background:var(--c-teal); height:100%;"></div>
-                            </div>
-                            <p style="font-size:0.9rem;">Stage ${p.stage}/11: <strong style="color:var(--c-navy);">${p.stageName}</strong></p>${p.notes && p.notes.length > 0 ? `
-                                <div style="background:var(--c-bg); padding:12px; border-radius:8px; margin-top:10px; font-size:0.9rem;">
-                                    <strong>Latest Update:</strong> ${p.notes[p.notes.length-1].text}
-                                </div>
-                            ` : ''}
-                        </div>
-                    </div>
-                `).join('')}
-            </div>
-        </div>
-        <script>
-            async function logout() {
-                await fetch('/api/auth/logout', {method:'POST'});
-                window.location.reload();
-            }
-        </script>
-    `;
-    res.send(await renderLayout('Dashboard', body, req));
-});
-
-// User Login (Simplified for architecture constraints, relies on created user)
-app.post('/api/auth/login', async (req, res) => {
-    const { email, password } = req.body;
-    const db = await getDb();
-    const user = await db.collection('users').findOne({ email });
-    // In a real scenario with no email delivery, we'd use a magic link printed in the admin panel.
-    // For this demo, if the user exists, we'll allow password check. Since temp password was hex, 
-    // we assume the admin sets it or the user used a 'forgot password' via admin.
-    // To allow evaluation, we will bypass strictly here if it's the admin logging in, but this is the customer portal.
-    if (!user || !verifyPassword(password, user.passwordHash)) {
-        // Special dev backdoor since email is disabled in this constraint
-        if(password !== 'demo123') return res.status(401).json({ error: 'Invalid credentials. (Hint for demo: set pass to demo123 via admin or use demo123 if newly registered in modified code)' });
-    }
-
-    const token = generateToken();
-    await db.collection('sessions').insertOne({
-        _id: hashToken(token),
-        userId: user._id,
-        expires: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
-    });
-    res.cookie('session', token, { httpOnly: true, secure: process.env.NODE_ENV==='production', sameSite: 'lax', maxAge: 7*24*60*60*1000 });
-    res.json({ success: true });
-});
-
-app.post('/api/auth/logout', async (req, res) => {
-    const token = req.cookies.session;
-    if (token) {
-        const db = await getDb();
-        await db.collection('sessions').deleteOne({ _id: hashToken(token) });
-    }
-    res.clearCookie('session');
-    res.json({ success: true });
-});
-
-// --- ADMIN MODULE INTEGRATION ---
-// Protect all /admin routes with admin authentication check
-app.use('/admin', adminModule(getDb, hashPassword, verifyPassword, generateToken, hashToken));
-
-// Global Error Handler
-app.use((err, req, res, next) => {
-    console.error(err);
-    res.status(500).json({ error: 'Internal Server Error' });
-});
-
-// Start Server
-if (require.main === module) {
-    const PORT = process.env.PORT || 3000;
-    app.listen(PORT, () => console.log(\`Server running on port \${PORT}\`));
-}
-
+const ph = C.phone.replace(/[^\d+]/g, ''), wa = 'https://wa.me/' + C.wa.replace(/\D/g, '');
+const ld = JSON.stringify({ '@context': 'https://schema.org', '@type': 'RoofingContractor', name: C.name, telephone: C.phone, email: C.email, address: C.address, areaServed: C.area, openingHours: C.hours, url: C.url }).replace(/</g, '\\u003c');
+const page = `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${esc(C.name)} | Roofing & Construction in ${esc(C.area)}</title>
+<meta name="description" content="${esc(C.name)} provides roof installation, repair, replacement, inspections and gutters in ${esc(C.area)}. Book a free estimate online.">
+<meta property="og:title" content="${esc(C.name)} | Roofing & Construction"><meta property="og:description" content="Book a free roofing estimate online."><meta property="og:type" content="website"><meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M2 17 16 5l14 12h-4v10H6V17z' fill='%23F26A1B'/%3E%3C/svg%3E">
+<script type="application/ld+json">${ld}</script>
+<style>
+:root{--bg:#FAF6F0;--card:#fff;--ink:#2B2F36;--mute:#5d6470;--or:#E85D0C;--or2:#FF8A3D;--bl:#14385C;--bl2:#1f5a94;--r:18px}
+*{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:76px}
+body{margin:0;font:17px/1.6 "Trebuchet MS","Segoe UI",system-ui,sans-serif;color:var(--ink);background:var(--bg);animation:in .5s ease}
+@keyframes in{from{opacity:0}}h1,h2,h3{font-family:Georgia,"Times New Roman",serif;line-height:1.15;margin:0 0 .5em;color:var(--bl)}
+h1{font-size:clamp(2.2rem,6vw,3.8rem)}h2{font-size:clamp(1.7rem,4vw,2.4rem)}a{color:inherit}
+:focus-visible{outline:3px solid var(--or);outline-offset:3px}
+.w{max-width:1120px;margin:auto;padding:0 20px}section{padding:72px 0}
+nav{position:sticky;top:0;z-index:20;background:rgba(250,246,240,.92);backdrop-filter:blur(8px);box-shadow:0 1px 8px #0001}
+nav .w{display:flex;align-items:center;gap:16px;height:64px}.logo{font:700 1.15rem Georgia,serif;color:var(--bl);text-decoration:none;display:flex;gap:8px;align-items:center;margin-right:auto}
+nav ul{display:flex;gap:20px;list-style:none;margin:0;padding:0}nav ul a{text-decoration:none;font-weight:600}nav ul a:hover{color:var(--or)}
+.btn{display:inline-block;border:0;cursor:pointer;font:700 1rem inherit;font-family:inherit;text-decoration:none;padding:12px 22px;border-radius:999px;transition:transform .15s,box-shadow .15s}
+.clay{background:linear-gradient(145deg,var(--or2),var(--or));color:#fff;box-shadow:6px 6px 14px #e85d0c55,-3px -3px 8px #fff8,inset 2px 2px 5px #fff6,inset -3px -3px 6px #0002}
+.clay:hover{transform:translateY(-2px)}.clay:active{transform:translateY(1px)}.ghost{background:#fff;color:var(--bl);box-shadow:0 2px 8px #0002}
+#mb{display:none;background:none;border:0;font-size:1.6rem}
+.hero{background:linear-gradient(135deg,var(--bl),#0b2038 60%,#3a2a1c);color:#fff;padding:90px 0 80px;position:relative;overflow:hidden}
+.hero:before{content:"";position:absolute;right:-80px;top:-60px;width:420px;height:420px;border-radius:50%;background:radial-gradient(var(--or),transparent 70%);opacity:.45}
+.hero .w{position:relative;display:grid;grid-template-columns:1.3fr 1fr;gap:36px;align-items:center}.hero h1{color:#fff}.hero p{max-width:52ch;color:#e6ebf2}
+.glass{background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.35);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-radius:var(--r);padding:24px;box-shadow:0 8px 30px #0004}
+.glass p{margin:.3em 0}.row{display:flex;gap:12px;flex-wrap:wrap;margin-top:24px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:20px}
+.card{background:var(--card);border-radius:var(--r);padding:26px;box-shadow:0 2px 12px #14385c14;border-top:4px solid var(--or)}.card:nth-child(even){border-top-color:var(--bl)}
+.card h3{font-size:1.25rem}.card p{margin:0;color:var(--mute)}
+.steps{counter-reset:s;list-style:none;padding:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:20px}
+.steps li{counter-increment:s;background:var(--card);padding:24px;border-radius:var(--r);box-shadow:0 2px 12px #14385c14}
+.steps li:before{content:counter(s);display:grid;place-items:center;width:38px;height:38px;border-radius:50%;margin-bottom:10px;font-weight:700;color:#fff;background:var(--bl)}
+.ph{aspect-ratio:4/3;border-radius:var(--r);display:grid;place-items:center;text-align:center;padding:14px;color:#fff;font-weight:600;background:linear-gradient(135deg,var(--bl2),var(--bl))}.ph:nth-child(2n){background:linear-gradient(135deg,var(--or2),#b9430a)}
+.alt{background:#fff}details{background:var(--bg);border-radius:12px;padding:14px 18px;margin-bottom:10px}summary{cursor:pointer;font-weight:700;color:var(--bl)}
+.book{display:grid;grid-template-columns:1fr 1.3fr;gap:36px;align-items:start}
+form{background:var(--card);padding:28px;border-radius:var(--r);box-shadow:0 6px 24px #14385c1f;display:grid;grid-template-columns:1fr 1fr;gap:14px}
+label{display:grid;gap:4px;font-weight:600;font-size:.92rem}.f{grid-column:1/-1}
+input,select,textarea{font:inherit;padding:11px 12px;border:1.5px solid #cfd4db;border-radius:10px;background:#fff;color:var(--ink)}textarea{min-height:96px;resize:vertical}
+.hp{position:absolute;left:-9999px}#msg{grid-column:1/-1;padding:12px;border-radius:10px;display:none;font-weight:600}#msg.ok{display:block;background:#e6f6ec;color:#17613a}#msg.err{display:block;background:#fdeaea;color:#9b1c1c}
+.note{font-size:.85rem;color:var(--mute)}footer{background:#1d2026;color:#cfd4db;padding:40px 0}footer a{color:#fff}
+.rv{opacity:0;transform:translateY(14px);transition:.6s}.rv.on{opacity:1;transform:none}
+@media(max-width:820px){.hero .w,.book{grid-template-columns:1fr}form{grid-template-columns:1fr}#mb{display:block}
+nav ul{display:none;position:absolute;top:64px;left:0;right:0;flex-direction:column;background:var(--bg);padding:16px 20px;box-shadow:0 8px 12px #0002}nav ul.open{display:flex}nav .cta{display:none}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;scroll-behavior:auto!important}.rv{opacity:1;transform:none}}
+</style></head><body>
+<nav aria-label="Main"><div class="w"><a class="logo" href="#top"><svg width="30" height="30" viewBox="0 0 32 32" aria-hidden="true"><path d="M2 17 16 5l14 12h-4v10H6V17z" fill="#E85D0C"/></svg>${esc(C.name)}</a>
+<ul id="menu"><li><a href="#services">Services</a></li><li><a href="#process">Process</a></li><li><a href="#gallery">Projects</a></li><li><a href="#area">Service area</a></li><li><a href="#faq">FAQ</a></li><li><a href="#book">Book</a></li></ul>
+<a class="btn ghost cta" href="tel:${esc(ph)}">Call ${esc(C.phone)}</a><a class="btn clay cta" href="${esc(wa)}" target="_blank" rel="noopener">WhatsApp</a>
+<button id="mb" aria-label="Menu" aria-expanded="false">&#9776;</button></div></nav>
+<header class="hero" id="top"><div class="w"><div><h1>Roofs and building work you can rely on.</h1>
+<p>${esc(C.name)} repairs, replaces and installs roofs across ${esc(C.area)}. Tell us about your property and we will arrange a free estimate.</p>
+<div class="row"><a class="btn clay" href="#book">Book a free estimate</a><a class="btn ghost" href="tel:${esc(ph)}">Call now</a></div></div>
+<aside class="glass" aria-label="Contact details"><h3 style="color:#fff">Talk to us</h3><p>Phone: <a href="tel:${esc(ph)}">${esc(C.phone)}</a></p><p>Email: ${esc(C.email)}</p><p>Hours: ${esc(C.hours)}</p><p>Address: ${esc(C.address)}</p></aside></div></header>
+<section id="services"><div class="w"><h2>What we do</h2><div class="grid">${SERVICES.map(x => `<article class="card rv"><h3>${esc(x[0])}</h3><p>${esc(x[1])}</p></article>`).join('')}</div>
+<p class="note">Edit this list to match the services the business actually offers.</p></div></section>
+<section class="alt" id="about"><div class="w"><h2>About ${esc(C.name)}</h2><p style="max-width:65ch">[COMPANY INTRODUCTION: add verified history, team, licences and insurance details here.]</p></div></section>
+<section id="process"><div class="w"><h2>How it works</h2><ol class="steps"><li class="rv"><h3>Book online</h3>Send your details and preferred time.</li><li class="rv"><h3>Free estimate</h3>We inspect the roof and quote in writing.</li><li class="rv"><h3>The work</h3>We schedule and complete the job.</li><li class="rv"><h3>Sign-off</h3>We walk you through the finished work.</li></ol></div></section>
+<section class="alt" id="gallery"><div class="w"><h2>Recent projects</h2><div class="grid">${[1, 2, 3].map(i => `<div class="ph rv" role="img" aria-label="Project photo placeholder ${i}">[PROJECT PHOTO ${i}]</div>`).join('')}</div>
+<h3 style="margin-top:36px">What customers say</h3><p class="note">[ADD GENUINE CUSTOMER TESTIMONIALS HERE. None are invented.]</p></div></section>
+<section id="area"><div class="w"><h2>Where we work</h2><p style="max-width:65ch">We serve ${esc(C.area)}. Not sure if you are covered? Call ${esc(C.phone)}.</p></div></section>
+<section class="alt" id="faq"><div class="w"><h2>Questions</h2>
+<details><summary>Is the estimate free?</summary><p>[CONFIRM: describe your estimate policy.]</p></details>
+<details><summary>How soon can you visit?</summary><p>[CONFIRM: typical lead time.]</p></details>
+<details><summary>Do you offer emergency repairs?</summary><p>[CONFIRM: only keep this if applicable.]</p></details></div></section>
+<section id="book"><div class="w book"><div><h2>Book a free estimate</h2><p>Fill in the form and we will confirm your visit by phone. Prefer to talk? <a href="tel:${esc(ph)}"><strong>${esc(C.phone)}</strong></a></p></div>
+<form id="bf" novalidate><label>Full name<input name="name" required autocomplete="name" maxlength="80"></label><label>Phone<input name="phone" type="tel" required autocomplete="tel" maxlength="25"></label>
+<label class="f">Email (optional)<input name="email" type="email" autocomplete="email" maxlength="120"></label><label class="f">Property address<input name="address" required autocomplete="street-address" maxlength="200"></label>
+<label class="f">Service<select name="service" required><option value="">Choose a service</option>${SERVICES.map(x => `<option>${esc(x[0])}</option>`).join('')}</select></label>
+<label>Preferred date<input name="date" type="date" required></label><label>Preferred time<input name="time" type="time" required></label>
+<label class="f">Project description<textarea name="description" required maxlength="1000" placeholder="What needs doing?"></textarea></label>
+<input class="hp" name="website" tabindex="-1" autocomplete="off" aria-hidden="true"><div id="msg" role="status"></div><button class="btn clay f" id="sb">Send booking request</button></form></div></section>
+<footer><div class="w"><strong>${esc(C.name)}</strong><br>${esc(C.address)} &middot; <a href="tel:${esc(ph)}">${esc(C.phone)}</a> &middot; ${esc(C.email)}<br><span class="note">&copy; ${new Date().getFullYear()} ${esc(C.name)}</span></div></footer>
+<script>
+const $=s=>document.querySelector(s),f=$('#bf'),m=$('#msg'),b=$('#sb');
+$('#mb').onclick=e=>{const o=$('#menu').classList.toggle('open');e.currentTarget.setAttribute('aria-expanded',o)};
+document.querySelectorAll('#menu a').forEach(a=>a.onclick=()=>$('#menu').classList.remove('open'));
+f.date.min=new Date().toISOString().slice(0,10);
+const io=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('on');io.unobserve(e.target)}}),{threshold:.15});
+document.querySelectorAll('.rv').forEach(x=>io.observe(x));
+f.onsubmit=async e=>{e.preventDefault();m.className='';m.style.display='none';
+ if(!f.checkValidity()&&!f.email.value){m.className='err';m.textContent='Please complete all required fields.';return}
+ b.disabled=true;b.textContent='Sending...';
+ try{const r=await fetch('/api/bookings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.fromEntries(new FormData(f)))});
+  const d=await r.json().catch(()=>({}));
+  if(r.ok){m.className='ok';m.textContent='Thank you. Your booking ID is '+d.bookingId+'. We will contact you to confirm.';f.reset()}
+  else{m.className='err';m.textContent=d.error||'Something went wrong. Please call us.'}
+ }catch(x){m.className='err';m.textContent='Network error. Check your connection or call us.'}
+ b.disabled=false;b.textContent='Send booking request'};
+</script></body></html>`;
+app.get('/', (q, r) => r.type('html').send(page));
+app.get('/healthz', (q, r) => r.json({ ok: true }));
+app.use((q, r) => r.status(404).type('html').send('<h1>Page not found</h1><a href="/">Back to home</a>'));
 module.exports = app;
