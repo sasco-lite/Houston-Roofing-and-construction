@@ -1,19 +1,24 @@
 {
-  "name": "houston-roofing-concept",
+  "name": "houston-roofing-and-construction",
   "version": "1.0.0",
-  "description": "Houston Roofing & Construction - Concept Site & Customer Portal",
+  "description": "Production website and management system for Houston Roofing & Construction",
   "main": "index.js",
-  "type": "module",
   "engines": {
     "node": "24.x"
   },
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "test": "node index.js --selftest",
+    "seed": "node index.js --seed"
   },
   "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "compression": "^1.8.1",
     "cookie-parser": "^1.4.7",
-    "cors": "^2.8.5",
     "express": "^4.21.2",
-    "firebase-admin": "^13.1.0"
+    "helmet": "^8.1.0",
+    "mongodb": "^6.14.2",
+    "zod": "^3.24.2"
   }
 }
