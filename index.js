@@ -1,13 +1,26 @@
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { getDb, getAuth, verifyUserSession } from './lib/firebase.js';
 import adminRouter from './admin.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 app.use(cookieParser());
+
+// Serve static assets from public/ (enables /css, /js, and auto-resolves .html files)
+app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'] }));
+
+// Root route fallback
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
 
 // Role verification middleware
 export async function requireAuth(req, res, next) {
@@ -71,13 +84,12 @@ app.post('/api/logout', (req, res) => {
 // Open Slots Engine
 app.get('/api/slots', async (req, res) => {
   try {
-    const { date, serviceKey } = req.query; // date: YYYY-MM-DD
+    const { date } = req.query; // date: YYYY-MM-DD
     if (!date) return res.status(400).json({ error: 'Date is required (YYYY-MM-DD)' });
 
     const db = getDb();
-    const dayOfWeek = new Date(`${date}T00:00:00-06:00`).getDay(); // 0 is Sunday
+    const dayOfWeek = new Date(`${date}T00:00:00-06:00`).getDay();
     
-    // Default business hours
     let startHour = 8;
     let endHour = 18;
     if (dayOfWeek === 6) { endHour = 16; } // Saturday
@@ -92,7 +104,6 @@ app.get('/api/slots', async (req, res) => {
       }
     }
 
-    // Check locked slots in Firestore
     const slotsSnapshot = await db.collection('slots')
       .where('date', '==', date)
       .get();
@@ -164,7 +175,7 @@ app.post('/api/bookings', requireAuth, async (req, res) => {
   }
 });
 
-// User Appointments & Project Tracker
+// Dashboard Data
 app.get('/api/my-dashboard', requireAuth, async (req, res) => {
   try {
     const db = getDb();
@@ -200,7 +211,7 @@ app.get('/api/my-dashboard', requireAuth, async (req, res) => {
 // Reschedule or Cancel Booking (24h cutoff check)
 app.patch('/api/appointments/:id', requireAuth, async (req, res) => {
   const { id } = req.params;
-  const { action, newSlotKey, newDate, newTime } = req.body;
+  const { action } = req.body;
   const db = getDb();
   const apptRef = db.collection('appointments').doc(id);
 
@@ -239,7 +250,7 @@ app.patch('/api/appointments/:id', requireAuth, async (req, res) => {
   }
 });
 
-// Public Active Announcements
+// Announcements
 app.get('/api/announcements', async (req, res) => {
   try {
     const db = getDb();
@@ -257,9 +268,7 @@ app.get('/api/announcements', async (req, res) => {
 // Admin Route Mount
 app.use('/api/admin', adminRouter);
 
-if (process.env.NODE_ENV !== 'production') {
-  const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
-}
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Houston Roofing app ready at http://localhost:${PORT}`));
 
 export default app;
