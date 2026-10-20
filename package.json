@@ -1,0 +1,19 @@
+{
+  "name": "houston-roofing-concept",
+  "version": "1.0.0",
+  "description": "Houston Roofing & Construction - Concept Site & Customer Portal",
+  "main": "index.js",
+  "type": "module",
+  "engines": {
+    "node": "24.x"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "firebase-admin": "^13.1.0"
+  }
+}
