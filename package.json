@@ -1,7 +1,7 @@
 {
-  "name": "houston-roofing-and-construction",
+  "name": "houston-roofing-platform",
   "version": "1.0.0",
-  "description": "Houston Roofing & Construction - Website, Live Booking & Project Tracking Portal",
+  "description": "Houston Roofing & Construction Booking and Management Platform",
   "main": "index.js",
   "engines": {
     "node": "24.x"
@@ -9,16 +9,11 @@
   "scripts": {
     "start": "node index.js",
     "dev": "node index.js",
-    "test": "node index.js --selftest",
-    "seed": "node index.js --seed"
+    "check": "node --check index.js && node --check admin.js"
   },
   "dependencies": {
-    "bcryptjs": "^2.4.3",
-    "compression": "^1.7.4",
     "cookie-parser": "^1.4.6",
     "express": "^4.19.2",
-    "helmet": "^7.1.0",
-    "mongodb": "^6.5.0",
-    "zod": "^3.23.8"
+    "mongodb": "^6.8.0"
   }
 }
