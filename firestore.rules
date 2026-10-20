@@ -1,0 +1,68 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.role == 'admin' ||
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'
+      );
+    }
+    function isStaff() {
+      return isAuthenticated() && (
+        isAdmin() ||
+        request.auth.token.role == 'staff' ||
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'staff'
+      );
+    }
+    function isOwner(uid) {
+      return isAuthenticated() && request.auth.uid == uid;
+    }
+
+    match /users/{uid} {
+      allow read: if isOwner(uid) || isStaff();
+      allow create: if isAuthenticated() && request.auth.uid == uid;
+      allow update: if isOwner(uid) || isAdmin();
+    }
+
+    match /appointments/{id} {
+      allow read: if isAuthenticated() && (resource.data.uid == request.auth.uid || isStaff());
+      allow create: if isAuthenticated();
+      allow update: if isStaff() || (
+        isAuthenticated() && 
+        resource.data.uid == request.auth.uid && 
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'rescheduledTo'])
+      );
+    }
+
+    match /slots/{slotKey} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    match /projects/{id} {
+      allow read: if isAuthenticated() && (resource.data.uid == request.auth.uid || isStaff());
+      allow write: if isStaff();
+
+      match /events/{eid} {
+        allow read: if isAuthenticated() && (
+          isStaff() || 
+          (get(/databases/$(database)/documents/projects/$(id)).data.uid == request.auth.uid && resource.data.visibleToCustomer == true)
+        );
+        allow write: if isStaff();
+      }
+    }
+
+    match /announcements/{id} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /settings/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+  }
+}
