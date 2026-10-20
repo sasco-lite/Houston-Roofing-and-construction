@@ -1,0 +1,194 @@
+@import './tokens.css';
+
+/* Hero Section */
+.hero {
+  position: relative;
+  padding: 80px 0 60px;
+  background: linear-gradient(180deg, rgba(255,248,240,0.4) 0%, rgba(255,248,240,1) 100%), 
+              url('https://images.unsplash.com/photo-1513694203232-719a280e022f?auto=format&fit=crop&w=1600&q=80') center/cover no-repeat;
+}
+
+.hero-card {
+  max-width: 600px;
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
+  padding: 40px;
+  border-radius: 20px;
+}
+
+.hero-eyebrow {
+  text-transform: uppercase;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--brand-blue);
+  margin-bottom: 12px;
+}
+
+.hero-title {
+  font-size: 2.5rem;
+  margin-bottom: 16px;
+  line-height: 1.15;
+}
+
+.hero-subhead {
+  font-size: 1.15rem;
+  color: var(--text-muted);
+  margin-bottom: 32px;
+}
+
+/* Service Grids */
+.grid-3 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 24px;
+  margin-top: 32px;
+}
+
+.card-service {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.card-service h3 {
+  margin-bottom: 12px;
+}
+
+.card-service p {
+  color: var(--text-muted);
+  font-size: 0.95rem;
+  margin-bottom: 16px;
+}
+
+/* Verification Badges */
+.badge-verify {
+  display: inline-block;
+  background: #FFF0E6;
+  color: #C05621;
+  border: 1px solid #FBD38D;
+  font-size: 0.75rem;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+/* Wizard Steps */
+.wizard-box {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-light);
+  border-radius: 16px;
+  padding: 32px;
+  max-width: 720px;
+  margin: 40px auto;
+}
+
+.step-indicator {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 32px;
+  position: relative;
+}
+
+.step-node {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.step-node.active {
+  color: var(--brand-blue);
+}
+
+.form-group {
+  margin-bottom: 20px;
+}
+
+.form-group label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 6px;
+  font-size: 0.9rem;
+}
+
+.form-group input, 
+.form-group select, 
+.form-group textarea {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  background: var(--bg-primary);
+  font-family: inherit;
+  font-size: 1rem;
+}
+
+/* Slot Select Grid */
+.slot-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.slot-btn {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-light);
+  padding: 10px;
+  border-radius: 6px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: center;
+}
+
+.slot-btn.selected {
+  background: var(--brand-blue);
+  color: #FFFFFF;
+  border-color: var(--brand-blue);
+}
+
+.slot-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Milestone Timeline for Dashboard */
+.timeline {
+  position: relative;
+  border-left: 2px solid var(--border-light);
+  margin-left: 16px;
+  padding-left: 24px;
+}
+
+.timeline-item {
+  position: relative;
+  margin-bottom: 32px;
+}
+
+.timeline-badge {
+  position: absolute;
+  left: -33px;
+  top: 0;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--brand-blue);
+  border: 3px solid #FFFFFF;
+}
+
+.timeline-badge.clay {
+  width: 24px;
+  height: 24px;
+  left: -37px;
+  border-radius: var(--clay-radius);
+  background: var(--clay-badge-bg);
+  box-shadow: var(--clay-badge-shadow);
+  border: 2px solid var(--brand-blue);
+}
